@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
         cerr << "no fasta reference supplied.  but do we really need it?" << endl;
         exit(1);
     } else {
-        reference.open(optarg);
+        reference.open(fastaReferenceFilename);
     }
 
     BamMultiReader reader;
@@ -185,7 +185,10 @@ int main(int argc, char** argv) {
     map<string, string> samplesToReadGroupIDs;
     for (SamReadGroupConstIterator g = header.ReadGroups.Begin(); g != header.ReadGroups.End(); ++g) {
         samplesToReadGroupIDs[g->Sample] = g->ID;
-        sampleList.push_back(g->Sample);
+    }
+    
+    for (map<string, string>::iterator s = samplesToReadGroupIDs.begin(); s != samplesToReadGroupIDs.end(); ++s) {
+        sampleList.push_back(s->first);
     }
 
     string commandline;
@@ -248,7 +251,7 @@ int main(int argc, char** argv) {
                     sampleCoverageMap.erase(i);
                 }
             }
-            lastErasedPosition = currPosition - 1;
+            lastErasedPosition = currPosition;
         }
 
         if (alignment.GetTag("RG", readGroup)) {
@@ -265,8 +268,9 @@ int main(int argc, char** argv) {
                 unsigned int l = c->Length;
                 char t = c->Type;
                 if (t == 'M') { // match or mismatch
-                    ++sampleCoverageMap[sp][sampleName];
-                    sp += l;
+                    for (int i = 0; i < l; ++i, ++sp) {
+                        ++sampleCoverageMap[sp][sampleName];
+                    }
                     rp += l;
                 } else if (t == 'D') { // deletion
                     sp += l;  // update reference sequence position
