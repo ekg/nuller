@@ -11,6 +11,10 @@
 using namespace BamTools;
 using namespace std;
 
+int qualityChar2Int(char c) {
+    return static_cast<int>(c) - 33;
+}
+
 void printUsage(int argc, char** argv) {
 
     cerr << "usage: " << argv[0] << " [options]" << endl
@@ -20,6 +24,7 @@ void printUsage(int argc, char** argv) {
          << "    -b, --bam FILE     use this BAM as input (any number, or none for stdin)" << endl
          << "    -q, --min-bq QUAL  threshold PHRED scaled base quality" << endl
          << "    -m, --min-mq QUAL  threshold PHRED scaled mapping quality" << endl
+         << "    -r, --region STR   specifies a region (chr:start..end) on which to call" << endl
          << endl
          << "Outputs a VCF where samples are called as reference where they have data." << endl
          << "The output is intended for use in data availability analysis." << endl
@@ -37,6 +42,8 @@ void writeNullVCFHeader(ostream& out, vector<string>& samples, string& reference
         << "##commandline=\"" << commandline << "\"" << endl
         << "##INFO=<ID=NS,Number=1,Type=Integer,Description=\"Number of samples with data\">" << endl
         << "##INFO=<ID=DP,Number=1,Type=Integer,Description=\"Total read depth at the locus\">" << endl
+        << "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">" << endl
+        << "##FORMAT=<ID=DP,Number=1,Type=Integer,Description=\"Read Depth\">" << endl
         << "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT";
         for (vector<string>::iterator s = samples.begin(); s != samples.end(); ++s) {
             out << "\t" << *s;
@@ -90,6 +97,7 @@ int main(int argc, char** argv) {
     int minBaseQuality = 0;
     int minMappingQuality = 0;
     string fastaReferenceFilename;
+    string regionStr;
     FastaReference reference;
 
     // parse command-line options
@@ -104,12 +112,13 @@ int main(int argc, char** argv) {
             {"min-bq", required_argument, 0, 'q'},
             {"min-mq", required_argument, 0, 'm'},
             {"fasta", required_argument, 0, 'f'},
+            {"region", required_argument, 0, 'r'},
             {0, 0, 0, 0}
         };
         /* getopt_long stores the option index here. */
         int option_index = 0;
 
-        c = getopt_long (argc, argv, "hb:q:m:f:",
+        c = getopt_long (argc, argv, "hb:q:m:f:r:",
                          long_options, &option_index);
 
         if (c == -1)
@@ -149,11 +158,16 @@ int main(int argc, char** argv) {
                 fastaReferenceFilename = optarg;
                 break;
 
+            case 'r':
+                regionStr = optarg;
+                break;
+
             default:
                 exit(1);
                 break;
         }
     }
+
 
     if (inputFilenames.empty()) {
         inputFilenames.push_back("stdin");
@@ -176,9 +190,12 @@ int main(int argc, char** argv) {
     SamHeader header = reader.GetHeader();
 
     map<int, string> refIDtoSequenceName;
+    map<string, int> sequenceNameToRefID;
     int i = 0;
     for (RefVector::const_iterator r = references.begin(); r != references.end(); ++r) {
-        refIDtoSequenceName[i++] = r->RefName;
+        refIDtoSequenceName[i] = r->RefName;
+        sequenceNameToRefID[r->RefName] = i;
+        ++i;
     }
 
     vector<string> sampleList;
@@ -195,6 +212,57 @@ int main(int argc, char** argv) {
     for (int i = 0; i < argc; ++i) {
         commandline += " " + string(argv[i]);
     }
+
+
+    // parse the region string
+    if (!regionStr.empty()) {
+
+        // parse the region string
+        string startSeq;
+        int startPos;
+        int stopPos;
+
+        size_t foundFirstColon = regionStr.find(":");
+
+        // we only have a single string, use the whole sequence as the target
+        if (foundFirstColon == string::npos) {
+            startSeq = regionStr;
+            startPos = 0;
+            stopPos = -1;
+        } else {
+            startSeq = regionStr.substr(0, foundFirstColon);
+            size_t foundRangeDots = regionStr.find("..", foundFirstColon);
+            if (foundRangeDots == string::npos) {
+                startPos = atoi(regionStr.substr(foundFirstColon + 1).c_str());
+                // differ from bamtools in this regard, in that we process only
+                // the specified position if a range isn't given
+                stopPos = startPos + 1;
+            } else {
+                startPos = atoi(regionStr.substr(foundFirstColon + 1, foundRangeDots - foundRangeDots - 1).c_str());
+                // if we have range dots specified, but no second number, read to the end of sequence
+                if (foundRangeDots + 2 != regionStr.size()) {
+                    stopPos = atoi(regionStr.substr(foundRangeDots + 2).c_str()); // end-exclusive, bed-format
+                } else {
+                    stopPos = reference.sequenceLength(startSeq);
+                }
+            }
+        }
+
+        if (stopPos == -1) {
+            stopPos = reference.sequenceLength(startSeq);
+        }
+
+        int startSeqRefID = sequenceNameToRefID[startSeq];
+
+        if (!reader.LocateIndexes()) {
+            cerr << "region specified, but could not open load BAM index" << endl;
+            exit(1);
+        } else {
+            reader.SetRegion(startSeqRefID, startPos, startSeqRefID, stopPos);
+        }
+
+    }
+
 
     // write the VCF header
     writeNullVCFHeader(cout, sampleList, fastaReferenceFilename, commandline);
@@ -258,7 +326,7 @@ int main(int argc, char** argv) {
             string sampleName = header.ReadGroups[readGroup].Sample;
             // parse the cigar, quality string
 
-            alignment.QueryBases;
+            //alignment.QueryBases;
 
             int rp = 0;  // read position, 0-based relative to read
             int sp = alignment.Position;  // sequence position
@@ -268,10 +336,12 @@ int main(int argc, char** argv) {
                 unsigned int l = c->Length;
                 char t = c->Type;
                 if (t == 'M') { // match or mismatch
-                    for (int i = 0; i < l; ++i, ++sp) {
-                        ++sampleCoverageMap[sp][sampleName];
+                    for (int i = 0; i < l; ++i, ++sp, ++rp) {
+                        int qual = qualityChar2Int(alignment.Qualities.at(rp));
+                        if (qual > minBaseQuality) {
+                            ++sampleCoverageMap[sp][sampleName];
+                        }
                     }
-                    rp += l;
                 } else if (t == 'D') { // deletion
                     sp += l;  // update reference sequence position
                 } else if (t == 'I') { // insertion
